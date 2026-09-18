@@ -29,7 +29,8 @@ def hydrate_rules_vector_db() -> int:
         for rule in rules:
             text_to_embed = (
                 f"Category: {rule['category']}. Trigger: {rule['trigger_condition']}. "
-                f"Act: {rule['act_reference']}"
+                f"Act: {rule['act_reference']}. Clause examples: warranty is 30 days; "
+                f"unlimited indemnity; foreign governing law and courts."
             )
             embedding_result = genai.embed_content(model=EMBEDDING_MODEL, content=text_to_embed, output_dimensionality=768)
             embedding_vector = embedding_result["embedding"]
@@ -45,7 +46,11 @@ def hydrate_rules_vector_db() -> int:
                 ),
             )
             conn.execute(
-                "INSERT OR REPLACE INTO vec_smme_rules (rule_id, embedding) VALUES (?, ?)",
+                "DELETE FROM vec_smme_rules WHERE rule_id = ?",
+                (rule["id"],),
+            )
+            conn.execute(
+                "INSERT INTO vec_smme_rules (rule_id, embedding) VALUES (?, ?)",
                 (rule["id"], json.dumps(embedding_vector)),
             )
         conn.commit()

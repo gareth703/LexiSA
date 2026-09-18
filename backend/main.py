@@ -17,6 +17,9 @@ from fastapi import FastAPI, File, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 from database import count_records, init_db, load_rules_matrix, save_contract
+from services.analyzer import analyze_clauses_with_gemini
+from services.parser import extract_text_from_file
+from services.segmenter import segment_clauses
 
 load_dotenv()
 try:
@@ -258,6 +261,7 @@ def health() -> dict[str, Any]:
         "gemini": "configured" if os.getenv("GEMINI_API_KEY") else "demo-mode",
         "laws_africa": "configured" if os.getenv("LAWS_AFRICA_API_TOKEN") else "demo-mode",
         "database": count_records(),
+        "phase2": {"parser": "pdfplumber/python-docx", "segmenter": "regex+Gemini fallback", "matcher": "sqlite-vec", "analyzer": "Gemini JSON+local fallback"},
     }
 
 @app.post("/api/v1/legal-search")
@@ -280,15 +284,17 @@ def demo_contract() -> ContractResponse:
 @app.post("/api/v1/upload-contract", response_model=ContractResponse)
 async def upload_contract(file: UploadFile = File(...)) -> ContractResponse:
     payload = await file.read()
-    text = extract_text(file.filename or "contract.pdf", payload)
-    clauses = split_clauses(text)
-    # Gemini is intentionally reserved for categorisation; local rules provide the guaranteed baseline.
-    categorized = gemini_json(json.dumps({"task": "categorize clauses", "clauses": [c.model_dump() for c in clauses]}))
-    if isinstance(categorized, list):
-        for clause, result in zip(clauses, categorized):
-            if isinstance(result, dict) and result.get("category"):
-                clause.category = result["category"]
-    analysis = analyze_clauses(clauses)
+    try:
+        text = extract_text_from_file(payload, file.filename or "contract.pdf")
+    except ValueError as error:
+        raise HTTPException(status_code=415, detail=str(error)) from error
+    segmented = segment_clauses(text)
+    analysis_result = analyze_clauses_with_gemini(segmented)
+    clauses = [Clause(number=item["clause_number"], heading=item.get("title", ""), text=item["text"], category=item.get("category", "Other")) for item in segmented]
+    analysis = AnalysisResult(
+        summary=RiskSummary(**analysis_result.summary),
+        risks=[Risk(id=item.id, clause_number=item.clause_number, category=item.category, risk_level=RiskLevel(item.risk_level), original_text=item.original_text, issue=item.issue_found, sa_law_citation=item.sa_law_citation, suggested_redline=item.suggested_redline) for item in analysis_result.risks],
+    )
     save_contract(file.filename or "uploaded contract", analysis.model_dump())
     return ContractResponse(filename=file.filename or "uploaded contract", text=text, clauses=clauses, analysis=analysis)
 
