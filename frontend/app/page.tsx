@@ -567,25 +567,31 @@ function PdfDocumentViewer({
         ".react-pdf__Page__textContent span",
       ) ?? [],
     );
+    const normalize = (value: string) =>
+      value.toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
+    const spanRanges: Array<{ span: HTMLSpanElement; start: number; end: number }> = [];
+    let documentText = "";
     spans.forEach((span) => {
+      const text = normalize(span.textContent ?? "");
+      const start = documentText.length;
+      documentText += `${documentText ? " " : ""}${text}`;
+      spanRanges.push({ span, start, end: documentText.length });
       span.classList.remove("pdf-risk-red", "pdf-risk-amber", "pdf-risk-selected");
-      const spanText = span.textContent?.toLowerCase() ?? "";
-      const match = risks.find((risk) => {
-        const terms = risk.original_text
-          .toLowerCase()
-          .replace(/[^a-z0-9. ]/g, " ")
-          .split(/\s+/)
-          .filter((term) => term.length > 4);
-        return terms.some((term) => spanText.includes(term));
-      });
-      if (match) {
+    });
+    risks.forEach((risk) => {
+      const clauseText = normalize(risk.original_text);
+      const matchStart = documentText.indexOf(clauseText);
+      if (matchStart < 0) return;
+      const matchEnd = matchStart + clauseText.length;
+      spanRanges.forEach(({ span, start, end }) => {
+        if (end <= matchStart || start >= matchEnd) return;
         span.classList.add(
-          match.risk_level === "RED" ? "pdf-risk-red" : "pdf-risk-amber",
+          risk.risk_level === "RED" ? "pdf-risk-red" : "pdf-risk-amber",
         );
-        if (match.clause_number === selectedClause) {
+        if (risk.clause_number === selectedClause) {
           span.classList.add("pdf-risk-selected");
         }
-      }
+      });
     });
   }
 
