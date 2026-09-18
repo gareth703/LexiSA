@@ -2,6 +2,7 @@
 
 import { useEffect, useMemo, useRef, useState } from "react";
 import { AlertTriangle, ArrowUpRight, Check, ChevronDown, Copy, FileText, Gavel, Loader2, MessageCircle, Paperclip, Send, ShieldCheck, Sparkles, Upload, X } from "lucide-react";
+import { ConvergenceLogo } from "@/components/brand";
 import { Badge, Button, Card, ScrollArea, cn } from "@/components/ui";
 
 type RiskLevel = "RED" | "AMBER" | "GREEN";
@@ -78,9 +79,9 @@ export default function Home() {
   }
   const counts = contract.analysis.summary;
 
-  return <main className="min-h-screen bg-[#f4f0e8]">
-    <header className="flex min-h-[76px] flex-wrap items-center justify-between gap-4 border-b border-[#d8ded8] bg-[#fbfaf7] px-5 py-4 lg:px-8">
-      <div className="flex items-center gap-3"><div className="flex h-10 w-10 items-center justify-center rounded-xl bg-[#11262a] text-[#f3a62f]"><ShieldCheck size={22} /></div><div><div className="font-display text-xl font-bold tracking-[-0.03em]">LexiSA</div><div className="text-[10px] font-bold uppercase tracking-[0.18em] text-[#71807c]">Contract intelligence</div></div></div>
+  return <main className="lexisa-app min-h-screen bg-[#f7f7f5]">
+    <header className="flex min-h-[76px] flex-wrap items-center justify-between gap-4 border-b border-[#d4d5d7] bg-[#17181c] px-5 py-4 lg:px-8">
+      <div className="flex items-center gap-4"><ConvergenceLogo /><div className="hidden h-8 w-px bg-[#d4d5d7] sm:block" /><div><div className="font-display text-xl font-bold tracking-[-0.03em] text-[#202126]">LexiSA</div><div className="text-[10px] font-bold uppercase tracking-[0.18em] text-[#6b6d73]">Contract intelligence</div></div></div>
       <div className="flex items-center gap-2"><input ref={fileInput} type="file" accept=".pdf,.docx" onChange={handleUpload} className="hidden" /><Button onClick={() => fileInput.current?.click()} className="bg-[#11262a] text-white hover:bg-[#25464b]">{loading ? <Loader2 size={16} className="animate-spin" /> : <Upload size={16} />} Upload contract</Button><Button className="hidden border border-[#ccd6d1] bg-white text-[#11262a] hover:bg-[#edf2ed] md:inline-flex"><ArrowUpRight size={16} /> Export redlined PDF</Button><Button className="hidden bg-[#f3a62f] text-[#11262a] hover:bg-[#e8a02e] lg:inline-flex"><Gavel size={16} /> Request attorney review</Button></div>
     </header>
     <section className="flex flex-wrap items-center justify-between gap-3 border-b border-[#d8ded8] bg-[#eef2ec] px-5 py-3 lg:px-8"><div className="flex items-center gap-2 text-xs text-[#62716d]"><FileText size={15} /><span className="max-w-[260px] truncate font-semibold text-[#11262a]">{contract.filename}</span><span>•</span><span>Reviewed just now</span></div><div className="flex items-center gap-2"><Metric color="bg-[#ec6855]" label="High" value={counts.red} /><Metric color="bg-[#e6b94f]" label="Medium" value={counts.amber} /><Metric color="bg-[#a4d5c8]" label="Low" value={counts.green} /></div></section>

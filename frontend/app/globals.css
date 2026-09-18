@@ -1,17 +1,35 @@
-@import url('https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700&family=Space+Grotesk:wght@500;600;700&display=swap');
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap');
 @tailwind base;
 @tailwind components;
 @tailwind utilities;
 
-:root { --font-display: 'Space Grotesk'; --font-sans: 'DM Sans'; }
+:root { --font-brand: 'Inter'; --font-sans: 'Inter'; --red: #e30613; --red-light: #ff2b36; --blue: #0b469d; --blue-light: #6d91c6; --midnight: #202126; --paper: #111216; }
 * { box-sizing: border-box; }
 html, body { min-height: 100%; }
-body { margin: 0; background: #f4f0e8; color: #11262a; font-family: var(--font-sans), sans-serif; }
+body { margin: 0; background: var(--paper); color: #f7f7f5; font-family: var(--font-sans), sans-serif; }
 button, input { font: inherit; }
-::selection { background: #f3a62f; color: #11262a; }
+::selection { background: var(--red-light); color: white; }
 
 .document-scroll::-webkit-scrollbar, .chat-scroll::-webkit-scrollbar { width: 6px; }
-.document-scroll::-webkit-scrollbar-thumb, .chat-scroll::-webkit-scrollbar-thumb { background: #c3cdc8; border-radius: 8px; }
+.document-scroll::-webkit-scrollbar-thumb, .chat-scroll::-webkit-scrollbar-thumb { background: #b9bcc2; border-radius: 8px; }
+
+.font-brand { font-family: var(--font-brand), sans-serif; }
+
+/* Keep the existing workbench structure while shifting its surfaces to the dark brand system. */
+.lexisa-app .bg-white { background-color: #202126 !important; color: #f7f7f5; }
+.lexisa-app .bg-\[\#fbfaf7\] { background-color: #17181c !important; }
+.lexisa-app .bg-\[\#f7f7f5\] { background-color: #111216 !important; }
+.lexisa-app .bg-\[\#eeeae1\] { background-color: #15171b !important; }
+.lexisa-app .bg-\[\#eef2ec\] { background-color: #20242d !important; }
+.lexisa-app .bg-\[\#f5f6f1\] { background-color: #292c34 !important; }
+.lexisa-app .bg-\[\#fff5d9\] { background-color: #3b292d !important; }
+.lexisa-app .text-\[\#11262a\], .lexisa-app .text-\[\#202126\] { color: #f7f7f5 !important; }
+.lexisa-app .text-\[\#334b4b\], .lexisa-app .text-\[\#38504d\], .lexisa-app .text-\[\#53635e\] { color: #c4c8d0 !important; }
+.lexisa-app .text-\[\#62716d\], .lexisa-app .text-\[\#71807c\], .lexisa-app .text-\[\#7c8984\], .lexisa-app .text-\[\#84908b\], .lexisa-app .text-\[\#8c9993\], .lexisa-app .text-\[\#98a49f\] { color: #b4bac5 !important; }
+.lexisa-app .text-\[\#ad7657\] { color: #ff6970 !important; }
+.lexisa-app input::placeholder { color: #aeb4c0 !important; }
+.lexisa-app .border-\[\#d8ded8\], .lexisa-app .border-\[\#ddd8ce\], .lexisa-app .border-\[\#e5e0d7\] { border-color: #343842 !important; }
+.lexisa-app .border-\[\#ccd6d1\], .lexisa-app .border-\[\#cbd5cf\], .lexisa-app .border-\[\#d6ded8\] { border-color: #454a56 !important; }
 
 @keyframes rise-in { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: translateY(0); } }
 .animate-rise { animation: rise-in 500ms ease both; }

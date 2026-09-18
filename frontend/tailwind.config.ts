@@ -5,15 +5,9 @@ const config: Config = {
   content: ["./app/**/*.{ts,tsx}", "./components/**/*.{ts,tsx}"],
   theme: {
     extend: {
-      colors: {
-        ink: "#11262a",
-        paper: "#f4f0e8",
-        saffron: "#f3a62f",
-        coral: "#ec6855",
-        mint: "#a4d5c8",
-      },
+      colors: { ink: "#202126", paper: "#f7f7f5", brandred: "#e30613", brandblue: "#0b469d" },
       fontFamily: {
-        display: ["var(--font-display)"],
+        display: ["var(--font-brand)"],
         sans: ["var(--font-sans)"],
       },
     },
