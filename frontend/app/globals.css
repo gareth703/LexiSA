@@ -16,6 +16,7 @@ button, input { font: inherit; }
 .font-brand { font-family: var(--font-brand), sans-serif; }
 .pdf-risk-red { background: rgba(227, 6, 19, 0.55); border-radius: 2px; color: #fff; }
 .pdf-risk-amber { background: rgba(245, 176, 43, 0.65); border-radius: 2px; color: #16171b; }
+.pdf-risk-accepted { background: rgba(61, 120, 109, 0.55); border-radius: 2px; color: #fff; }
 .pdf-risk-selected { outline: 2px solid #fff; outline-offset: 1px; }
 
 /* Keep the existing workbench structure while shifting its surfaces to the dark brand system. */

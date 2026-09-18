@@ -81,7 +81,7 @@ def analyze_clauses_with_gemini(clauses: list[dict[str, str]]) -> ContractAnalys
         try:
             genai.configure(api_key=api_key)
             model = genai.GenerativeModel(
-                "gemini-1.5-flash",
+                os.getenv("GEMINI_CHAT_MODEL", "gemini-3.1-flash-lite"),
                 system_instruction=(
                     "You are a South African contract risk analyst. Evaluate only the supplied clauses "
                     "and candidate rules. Return valid JSON matching the ContractAnalysisResult schema. "

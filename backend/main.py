@@ -15,10 +15,15 @@ import fitz
 from dotenv import load_dotenv
 from fastapi import FastAPI, File, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
-from database import count_records, init_db, load_rules_matrix, save_contract
+from database import count_records, get_chat_history, get_contract, init_db, load_rules_matrix, save_chat_message, save_contract
+from middleware.cost_controller import CostControlMiddleware
 from services.analyzer import analyze_clauses_with_gemini
+from services.chat_rag import answer_contract_question
 from services.parser import extract_text_from_file
+from services.pdf_exporter import export_contract_pdf
+from services.redliner import accept_redline, apply_redlines_to_clauses, list_redlines, submit_custom_redline
 from services.segmenter import segment_clauses
 
 load_dotenv()
@@ -28,6 +33,10 @@ except ImportError:  # pragma: no cover
     genai = None
 
 app = FastAPI(title="LexiSA Contract Intelligence API", version="0.1.0")
+# Added before CORSMiddleware so CORS ends up as the outermost layer (Starlette
+# wraps middleware in reverse-registration order) and still decorates 429
+# quota-exceeded responses.
+app.add_middleware(CostControlMiddleware)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["http://localhost:3000", "http://localhost:3001", "http://localhost:3002", "http://localhost:3003"],
@@ -94,6 +103,7 @@ class AnalysisResult(BaseModel):
     risks: list[Risk]
 
 class ContractResponse(BaseModel):
+    contract_id: str
     filename: str
     text: str
     clauses: list[Clause]
@@ -110,6 +120,38 @@ class ChatResponse(BaseModel):
     answer: str
     citations: list[str] = []
     legal_sources: list[dict[str, str]] = []
+
+class RAGChatRequest(BaseModel):
+    query: str = Field(min_length=1)
+
+class RAGChatResponse(BaseModel):
+    answer: str
+    cited_clause_numbers: list[str] = []
+    sa_statute_citation: str = ""
+    suggested_followups: list[str] = []
+    legal_sources: list[dict[str, str]] = []
+
+class RedlineStatus(str, Enum):
+    ACCEPTED = "ACCEPTED"
+    REJECTED = "REJECTED"
+    PENDING = "PENDING"
+
+class RedlineRecord(BaseModel):
+    id: str
+    contract_id: str
+    clause_number: str
+    original_text: str
+    redlined_text: str
+    status: RedlineStatus
+
+class AcceptRedlineRequest(BaseModel):
+    contract_id: str
+    clause_number: str
+
+class CustomRedlineRequest(BaseModel):
+    contract_id: str
+    clause_number: str
+    custom_text: str = Field(min_length=1)
 
 class LegalSearchRequest(BaseModel):
     query: str = Field(min_length=2)
@@ -200,7 +242,7 @@ def gemini_json(prompt: str) -> Any | None:
         return None
     try:
         genai.configure(api_key=api_key)
-        model = genai.GenerativeModel("gemini-1.5-flash", system_instruction="You are a South African contract analyst. Return only valid JSON.")
+        model = genai.GenerativeModel(os.getenv("GEMINI_CHAT_MODEL", "gemini-3.1-flash-lite"), system_instruction="You are a South African contract analyst. Return only valid JSON.")
         response = model.generate_content(prompt, generation_config={"response_mime_type": "application/json"})
         return json.loads(response.text)
     except Exception:
@@ -279,7 +321,9 @@ def evaluate_creation_rules(context: ContractCreationContext) -> dict[str, list[
 @app.get("/api/v1/demo-contract", response_model=ContractResponse)
 def demo_contract() -> ContractResponse:
     clauses = split_clauses(DEMO_CONTRACT)
-    return ContractResponse(filename="Master Services Agreement — demo", text=DEMO_CONTRACT, clauses=clauses, analysis=analyze_clauses(clauses))
+    analysis = analyze_clauses(clauses)
+    contract_id = save_contract("Master Services Agreement — demo", DEMO_CONTRACT, [clause.model_dump() for clause in clauses], analysis.model_dump())
+    return ContractResponse(contract_id=contract_id, filename="Master Services Agreement — demo", text=DEMO_CONTRACT, clauses=clauses, analysis=analysis)
 
 @app.post("/api/v1/upload-contract", response_model=ContractResponse)
 async def upload_contract(file: UploadFile = File(...)) -> ContractResponse:
@@ -295,12 +339,62 @@ async def upload_contract(file: UploadFile = File(...)) -> ContractResponse:
         summary=RiskSummary(**analysis_result.summary),
         risks=[Risk(id=item.id, clause_number=item.clause_number, category=item.category, risk_level=RiskLevel(item.risk_level), original_text=item.original_text, issue=item.issue_found, sa_law_citation=item.sa_law_citation, suggested_redline=item.suggested_redline) for item in analysis_result.risks],
     )
-    save_contract(file.filename or "uploaded contract", analysis.model_dump())
-    return ContractResponse(filename=file.filename or "uploaded contract", text=text, clauses=clauses, analysis=analysis)
+    filename = file.filename or "uploaded contract"
+    contract_id = save_contract(filename, text, [clause.model_dump() for clause in clauses], analysis.model_dump())
+    return ContractResponse(contract_id=contract_id, filename=filename, text=text, clauses=clauses, analysis=analysis)
 
 @app.post("/api/v1/analyze-risks", response_model=AnalysisResult)
 def analyze_risks(request: AnalyzeRequest) -> AnalysisResult:
     return analyze_clauses(request.clauses)
+
+@app.post("/api/v1/contracts/{contract_id}/chat", response_model=RAGChatResponse)
+def contract_chat(contract_id: str, request: RAGChatRequest) -> RAGChatResponse:
+    try:
+        history = get_chat_history(contract_id)
+        result = answer_contract_question(contract_id, request.query, history)
+    except ValueError as error:
+        raise HTTPException(status_code=404, detail=str(error)) from error
+    save_chat_message(contract_id, "user", request.query)
+    save_chat_message(contract_id, "assistant", result["answer"])
+    return RAGChatResponse(**result)
+
+@app.get("/api/v1/contracts/{contract_id}", response_model=ContractResponse)
+def get_contract_state(contract_id: str) -> ContractResponse:
+    contract = get_contract(contract_id)
+    if not contract:
+        raise HTTPException(status_code=404, detail=f"Contract session not found: {contract_id}")
+    redlines = list_redlines(contract_id)
+    clauses = [Clause(**item) for item in apply_redlines_to_clauses(contract["clauses"], redlines)]
+    analysis = AnalysisResult(**contract["analysis"])
+    return ContractResponse(contract_id=contract_id, filename=contract["filename"], text=contract["text"], clauses=clauses, analysis=analysis)
+
+@app.get("/api/v1/contracts/{contract_id}/redlines", response_model=list[RedlineRecord])
+def get_contract_redlines(contract_id: str) -> list[RedlineRecord]:
+    if not get_contract(contract_id):
+        raise HTTPException(status_code=404, detail=f"Contract session not found: {contract_id}")
+    return [RedlineRecord(**redline) for redline in list_redlines(contract_id)]
+
+@app.post("/api/v1/redlines/accept", response_model=RedlineRecord)
+def redlines_accept(request: AcceptRedlineRequest) -> RedlineRecord:
+    try:
+        return RedlineRecord(**accept_redline(request.contract_id, request.clause_number))
+    except ValueError as error:
+        raise HTTPException(status_code=404, detail=str(error)) from error
+
+@app.post("/api/v1/redlines/custom", response_model=RedlineRecord)
+def redlines_custom(request: CustomRedlineRequest) -> RedlineRecord:
+    try:
+        return RedlineRecord(**submit_custom_redline(request.contract_id, request.clause_number, request.custom_text))
+    except ValueError as error:
+        raise HTTPException(status_code=404, detail=str(error)) from error
+
+@app.get("/api/v1/contracts/{contract_id}/export-pdf")
+def export_contract_pdf_endpoint(contract_id: str) -> FileResponse:
+    try:
+        output_path = export_contract_pdf(contract_id)
+    except ValueError as error:
+        raise HTTPException(status_code=404, detail=str(error)) from error
+    return FileResponse(output_path, media_type="application/pdf", filename=f"{contract_id}-redlined.pdf")
 
 @app.post("/api/v1/chat-qa", response_model=ChatResponse)
 def chat_qa(request: ChatRequest) -> ChatResponse:

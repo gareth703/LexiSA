@@ -23,49 +23,34 @@ import { Badge, Button, Card, ScrollArea, cn } from "@/components/ui";
 import { Document, Page, pdfjs } from "react-pdf";
 import "react-pdf/dist/Page/AnnotationLayer.css";
 import "react-pdf/dist/Page/TextLayer.css";
+import {
+  acceptRedline,
+  downloadRedlinedPDF,
+  fetchDemoContract,
+  sendChatMessage,
+  uploadAndAnalyzeContract,
+  type Clause,
+  type Contract,
+  type LegalSource,
+  type Risk,
+  type RiskLevel,
+} from "@/lib/api";
 
-pdfjs.GlobalWorkerOptions.workerSrc = `//unpkg.com/pdfjs-dist@${pdfjs.version}/build/pdf.worker.min.mjs`;
+pdfjs.GlobalWorkerOptions.workerSrc = new URL(
+  "pdfjs-dist/build/pdf.worker.min.mjs",
+  import.meta.url,
+).toString();
 
-type RiskLevel = "RED" | "AMBER" | "GREEN";
-type Clause = {
-  number: string;
-  heading: string;
-  text: string;
-  category: string;
-};
-type Risk = {
-  id: string;
-  clause_number: string;
-  category: string;
-  risk_level: RiskLevel;
-  original_text: string;
-  issue: string;
-  sa_law_citation: string;
-  suggested_redline: string;
-};
-type Contract = {
-  filename: string;
-  text: string;
-  clauses: Clause[];
-  analysis: {
-    summary: {
-      red: number;
-      amber: number;
-      green: number;
-      overall_score: string;
-    };
-    risks: Risk[];
-  };
-};
-type LegalSource = { title: string; url: string; text: string };
 type ChatMessage = {
   role: "user" | "assistant";
   text: string;
   citations?: string[];
+  sa_statute_citation?: string;
   legal_sources?: LegalSource[];
 };
 
 const demo: Contract = {
+  contract_id: "",
   filename: "Master Services Agreement — demo",
   text: "",
   clauses: [
@@ -181,8 +166,12 @@ demo.analysis.risks = [
   },
 ];
 
-const API = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000";
 const riskOrder: Record<RiskLevel, number> = { RED: 0, AMBER: 1, GREEN: 2 };
+const DEFAULT_SUGGESTIONS = [
+  "Is this POPIA compliant?",
+  "What is the notice period for termination?",
+  "Are there hidden liabilities?",
+];
 
 export default function Home() {
   const [contract, setContract] = useState<Contract>(demo);
@@ -198,8 +187,11 @@ export default function Home() {
       citations: ["LexiSA review"],
     },
   ]);
+  const [suggestions, setSuggestions] = useState<string[]>(DEFAULT_SUGGESTIONS);
+  const [isTyping, setIsTyping] = useState(false);
   const [question, setQuestion] = useState("");
   const [loading, setLoading] = useState(false);
+  const [exporting, setExporting] = useState(false);
   const [uploadError, setUploadError] = useState("");
   const [documentUrl, setDocumentUrl] = useState<string | null>(null);
   const [documentIsPdf, setDocumentIsPdf] = useState(false);
@@ -212,10 +204,16 @@ export default function Home() {
         .sort((a, b) => riskOrder[a.risk_level] - riskOrder[b.risk_level]),
     [contract.analysis.risks, dismissed],
   );
+  const acceptedClauseNumbers = useMemo(
+    () =>
+      contract.analysis.risks
+        .filter((risk) => accepted.includes(risk.id))
+        .map((risk) => risk.clause_number),
+    [contract.analysis.risks, accepted],
+  );
 
   useEffect(() => {
-    fetch(`${API}/api/v1/demo-contract`)
-      .then((response) => (response.ok ? response.json() : Promise.reject()))
+    fetchDemoContract()
       .then(setContract)
       .catch(() => undefined);
   }, []);
@@ -238,21 +236,16 @@ export default function Home() {
     if (!file) return;
     setLoading(true);
     setUploadError("");
-    const body = new FormData();
-    body.append("file", file);
     try {
-      const response = await fetch(`${API}/api/v1/upload-contract`, {
-        method: "POST",
-        body,
-      });
-      if (!response.ok) throw new Error("upload failed");
-      const uploadedContract = await response.json();
+      const uploadedContract = await uploadAndAnalyzeContract(file);
       setContract(uploadedContract);
       setDocumentUrl(URL.createObjectURL(file));
-      setDocumentIsPdf(file.type === "application/pdf");
+      setDocumentIsPdf(file.type === "application/pdf" || file.name.toLowerCase().endsWith(".pdf"));
+      setUploadError("");
       setAccepted([]);
       setDismissed([]);
       setSelectedClause(null);
+      setSuggestions(DEFAULT_SUGGESTIONS);
       setActiveTab("risks");
     } catch {
       setUploadError(
@@ -269,37 +262,23 @@ export default function Home() {
     setLoading(false);
   }
   async function ask(query = question) {
-    if (!query.trim()) return;
+    if (!query.trim() || !contract.contract_id) return;
     setQuestion("");
     setChat((messages) => [...messages, { role: "user", text: query }]);
+    setIsTyping(true);
     try {
-      const response = await fetch(`${API}/api/v1/chat-qa`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          query,
-          contract_context:
-            contract.text ||
-            contract.clauses.map((clause) => clause.text).join("\n"),
-        }),
-      });
-      const data = response.ok
-        ? await response.json()
-        : {
-            answer:
-              "The local assistant is offline. Review the highlighted clauses for the current risk picture.",
-            citations: [],
-            legal_sources: [],
-          };
+      const data = await sendChatMessage(contract.contract_id, query);
       setChat((messages) => [
         ...messages,
         {
           role: "assistant",
           text: data.answer,
-          citations: data.citations,
+          citations: data.cited_clause_numbers,
+          sa_statute_citation: data.sa_statute_citation,
           legal_sources: data.legal_sources,
         },
       ]);
+      if (data.suggested_followups.length) setSuggestions(data.suggested_followups);
     } catch {
       setChat((messages) => [
         ...messages,
@@ -309,6 +288,33 @@ export default function Home() {
         },
       ]);
     }
+    setIsTyping(false);
+  }
+  async function handleAcceptRedline(risk: Risk) {
+    if (!contract.contract_id || accepted.includes(risk.id)) return;
+    try {
+      const redline = await acceptRedline(contract.contract_id, risk.clause_number);
+      setContract((current) => ({
+        ...current,
+        clauses: current.clauses.map((clause) =>
+          clause.number === risk.clause_number ? { ...clause, text: redline.redlined_text } : clause,
+        ),
+      }));
+      setAccepted((items) => [...items, risk.id]);
+    } catch {
+      setUploadError("Could not save the redline. Check that the FastAPI backend is running.");
+    }
+  }
+  async function handleExportPdf() {
+    if (!contract.contract_id || exporting) return;
+    setExporting(true);
+    try {
+      const safeName = contract.filename.replace(/[^a-z0-9]+/gi, "-").toLowerCase();
+      await downloadRedlinedPDF(contract.contract_id, `${safeName}-redlined.pdf`);
+    } catch {
+      setUploadError("Could not export the redlined PDF. Check that the FastAPI backend is running.");
+    }
+    setExporting(false);
   }
   const counts = contract.analysis.summary;
 
@@ -354,8 +360,12 @@ export default function Home() {
               {uploadError}
             </span>
           )}
-          <Button className="hidden border border-[#ccd6d1] bg-white text-[#11262a] hover:bg-[#edf2ed] md:inline-flex">
-            <ArrowUpRight size={16} /> Export redlined PDF
+          <Button
+            onClick={handleExportPdf}
+            disabled={!contract.contract_id || exporting}
+            className="hidden border border-[#ccd6d1] bg-white text-[#11262a] hover:bg-[#edf2ed] disabled:opacity-50 md:inline-flex"
+          >
+            {exporting ? <Loader2 size={16} className="animate-spin" /> : <ArrowUpRight size={16} />} Export redlined PDF
           </Button>
           <Button className="hidden bg-[#f3a62f] text-[#11262a] hover:bg-[#e8a02e] lg:inline-flex">
             <Gavel size={16} /> Request attorney review
@@ -399,6 +409,7 @@ export default function Home() {
                   url={documentUrl}
                   risks={contract.analysis.risks}
                   selectedClause={selectedClause}
+                  acceptedClauseNumbers={acceptedClauseNumbers}
                 />
               ) : (
                 <div className="space-y-1 rounded-xl border border-[#ddd8ce] bg-[#f8f6ef] p-6 shadow-[0_12px_30px_rgba(17,38,42,0.04)]">
@@ -519,13 +530,7 @@ export default function Home() {
                         setExpanded(expanded === risk.id ? null : risk.id)
                       }
                       onJump={() => jumpToClause(risk.clause_number)}
-                      onAccept={() =>
-                        setAccepted((items) =>
-                          items.includes(risk.id)
-                            ? items.filter((item) => item !== risk.id)
-                            : [...items, risk.id],
-                        )
-                      }
+                      onAccept={() => handleAcceptRedline(risk)}
                       onDismiss={() =>
                         setDismissed((items) => [...items, risk.id])
                       }
@@ -540,6 +545,8 @@ export default function Home() {
                 setQuestion={setQuestion}
                 onAsk={ask}
                 onJump={jumpToClause}
+                suggestions={suggestions}
+                isTyping={isTyping}
               />
             )}
           </div>
@@ -553,10 +560,12 @@ function PdfDocumentViewer({
   url,
   risks,
   selectedClause,
+  acceptedClauseNumbers,
 }: {
   url: string;
   risks: Risk[];
   selectedClause: string | null;
+  acceptedClauseNumbers: string[];
 }) {
   const [pageCount, setPageCount] = useState(0);
   const viewerRef = useRef<HTMLDivElement>(null);
@@ -576,18 +585,22 @@ function PdfDocumentViewer({
       const start = documentText.length;
       documentText += `${documentText ? " " : ""}${text}`;
       spanRanges.push({ span, start, end: documentText.length });
-      span.classList.remove("pdf-risk-red", "pdf-risk-amber", "pdf-risk-selected");
+      span.classList.remove("pdf-risk-red", "pdf-risk-amber", "pdf-risk-accepted", "pdf-risk-selected");
     });
     risks.forEach((risk) => {
       const clauseText = normalize(risk.original_text);
       const matchStart = documentText.indexOf(clauseText);
       if (matchStart < 0) return;
       const matchEnd = matchStart + clauseText.length;
+      const isAccepted = acceptedClauseNumbers.includes(risk.clause_number);
+      const highlightClass = isAccepted
+        ? "pdf-risk-accepted"
+        : risk.risk_level === "RED"
+          ? "pdf-risk-red"
+          : "pdf-risk-amber";
       spanRanges.forEach(({ span, start, end }) => {
         if (end <= matchStart || start >= matchEnd) return;
-        span.classList.add(
-          risk.risk_level === "RED" ? "pdf-risk-red" : "pdf-risk-amber",
-        );
+        span.classList.add(highlightClass);
         if (risk.clause_number === selectedClause) {
           span.classList.add("pdf-risk-selected");
         }
@@ -597,7 +610,7 @@ function PdfDocumentViewer({
 
   useEffect(() => {
     highlightTextLayer();
-  }, [selectedClause, risks]);
+  }, [selectedClause, risks, acceptedClauseNumbers]);
 
   return (
     <div
@@ -723,10 +736,11 @@ function RiskCard({
             <div className="mt-3 flex gap-2">
               <Button
                 onClick={onAccept}
-                className="bg-[#11262a] px-2.5 py-1.5 text-xs text-white hover:bg-[#25464b]"
+                disabled={accepted}
+                className="bg-[#11262a] px-2.5 py-1.5 text-xs text-white hover:bg-[#25464b] disabled:opacity-60"
               >
                 <Check size={14} />{" "}
-                {accepted ? "Undo accept" : "Accept redline"}
+                {accepted ? "Accepted" : "Accept redline"}
               </Button>
               <Button
                 onClick={() =>
@@ -749,18 +763,17 @@ function ChatView({
   setQuestion,
   onAsk,
   onJump,
+  suggestions,
+  isTyping,
 }: {
   messages: ChatMessage[];
   question: string;
   setQuestion: (value: string) => void;
   onAsk: (query?: string) => void;
   onJump: (clause: string) => void;
+  suggestions: string[];
+  isTyping: boolean;
 }) {
-  const suggestions = [
-    "Is this POPIA compliant?",
-    "What is the notice period for termination?",
-    "Are there hidden liabilities?",
-  ];
   return (
     <div className="flex min-h-0 flex-1 flex-col">
       <ScrollArea className="chat-scroll mb-4 flex-1 pr-2">
@@ -782,9 +795,14 @@ function ChatView({
                   onClick={() => onJump(citation.replace(/[^0-9.]/g, ""))}
                   className="mt-2 mr-1 inline-flex items-center gap-1 rounded-full border border-[#cbd8d0] bg-white px-2 py-1 text-[10px] font-bold text-[#55736b]"
                 >
-                  <FileText size={11} /> {citation}
+                  <FileText size={11} /> Clause {citation}
                 </button>
               ))}
+              {message.sa_statute_citation && (
+                <span className="mt-2 mr-1 inline-flex items-center gap-1 rounded-full border border-[#cbd8d0] bg-white px-2 py-1 text-[10px] font-bold text-[#55736b]">
+                  <Gavel size={11} /> {message.sa_statute_citation}
+                </span>
+              )}
               {message.legal_sources?.map(
                 (source) =>
                   source.url && (
@@ -801,6 +819,13 @@ function ChatView({
               )}
             </div>
           ))}
+          {isTyping && (
+            <div className="max-w-[92%] rounded-xl bg-[#eef2ec] p-3 text-sm text-[#38504d]">
+              <span className="inline-flex items-center gap-1">
+                <Loader2 size={14} className="animate-spin" /> LexiSA is thinking...
+              </span>
+            </div>
+          )}
         </div>
       </ScrollArea>
       <div className="mb-3 flex flex-wrap gap-2">
@@ -820,14 +845,16 @@ function ChatView({
           onChange={(event) => setQuestion(event.target.value)}
           onKeyDown={(event) => event.key === "Enter" && onAsk()}
           placeholder="Ask about this agreement..."
-          className="min-w-0 flex-1 bg-transparent px-2 text-sm outline-none placeholder:text-[#a1aba6]"
+          disabled={isTyping}
+          className="min-w-0 flex-1 bg-transparent px-2 text-sm outline-none placeholder:text-[#a1aba6] disabled:opacity-60"
         />
         <Button
           onClick={() => onAsk()}
+          disabled={isTyping}
           aria-label="Send question"
-          className="h-9 w-9 rounded-lg bg-[#f3a62f] p-0 text-[#11262a] hover:bg-[#e8a02e]"
+          className="h-9 w-9 rounded-lg bg-[#f3a62f] p-0 text-[#11262a] hover:bg-[#e8a02e] disabled:opacity-60"
         >
-          <Send size={16} />
+          {isTyping ? <Loader2 size={16} className="animate-spin" /> : <Send size={16} />}
         </Button>
       </div>
     </div>
