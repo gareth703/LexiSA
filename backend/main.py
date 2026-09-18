@@ -27,13 +27,13 @@ except ImportError:  # pragma: no cover
 app = FastAPI(title="LexiSA Contract Intelligence API", version="0.1.0")
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:3000", "http://localhost:3001"],
+    allow_origins=["http://localhost:3000", "http://localhost:3001", "http://localhost:3002", "http://localhost:3003"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 RULES_MATRIX = load_rules_matrix()
-init_db(RULES_MATRIX)
+init_db()
 
 DEMO_CONTRACT = """MASTER SERVICES AGREEMENT
 
@@ -195,12 +195,12 @@ def gemini_json(prompt: str) -> Any | None:
     api_key = os.getenv("GEMINI_API_KEY")
     if not api_key or not genai:
         return None
-    genai.configure(api_key=api_key)
-    model = genai.GenerativeModel("gemini-1.5-flash", system_instruction="You are a South African contract analyst. Return only valid JSON.")
-    response = model.generate_content(prompt, generation_config={"response_mime_type": "application/json"})
     try:
+        genai.configure(api_key=api_key)
+        model = genai.GenerativeModel("gemini-1.5-flash", system_instruction="You are a South African contract analyst. Return only valid JSON.")
+        response = model.generate_content(prompt, generation_config={"response_mime_type": "application/json"})
         return json.loads(response.text)
-    except (json.JSONDecodeError, AttributeError):
+    except Exception:
         return None
 
 
