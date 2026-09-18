@@ -5,6 +5,8 @@ import json
 import os
 import re
 import tempfile
+from urllib.error import HTTPError, URLError
+from urllib.request import Request, urlopen
 from enum import Enum
 from pathlib import Path
 from typing import Any
@@ -24,7 +26,7 @@ except ImportError:  # pragma: no cover
 app = FastAPI(title="LexiSA Contract Intelligence API", version="0.1.0")
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:3000"],
+    allow_origins=["http://localhost:3000", "http://localhost:3001"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -101,6 +103,11 @@ class ChatRequest(BaseModel):
 class ChatResponse(BaseModel):
     answer: str
     citations: list[str] = []
+    legal_sources: list[dict[str, str]] = []
+
+class LegalSearchRequest(BaseModel):
+    query: str = Field(min_length=2)
+    top_k: int = Field(default=5, ge=1, le=10)
 
 CATEGORY_KEYWORDS = {
     "Warranty": ["warrant", "delivery"],
@@ -174,6 +181,40 @@ def gemini_json(prompt: str) -> Any | None:
     api_key = os.getenv("GEMINI_API_KEY")
     if not api_key or not genai:
         return None
+
+
+def laws_africa_retrieve(query: str, top_k: int = 5) -> list[dict[str, str]]:
+    """Retrieve current South African legal context from the Laws.Africa sandbox."""
+    token = os.getenv("LAWS_AFRICA_API_TOKEN")
+    kb_code = os.getenv("LAWS_AFRICA_KB_CODE", "legislation-za")
+    if not token or token == "your-laws-africa-sandbox-token":
+        return []
+    payload = json.dumps({
+        "text": query,
+        "top_k": top_k,
+        "filters": {"principal": True, "repealed": False, "frbr_place": "za"},
+    }).encode("utf-8")
+    request = Request(
+        f"https://api.laws.africa/ai/v1/knowledge-bases/{kb_code}/retrieve",
+        data=payload,
+        headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
+        method="POST",
+    )
+    try:
+        with urlopen(request, timeout=15) as response:
+            data = json.loads(response.read().decode("utf-8"))
+    except (HTTPError, URLError, TimeoutError, json.JSONDecodeError):
+        return []
+    sources: list[dict[str, str]] = []
+    for result in data.get("results", []):
+        metadata = result.get("metadata", {})
+        source_url = metadata.get("portion_public_url") or metadata.get("public_url") or ""
+        sources.append({
+            "title": metadata.get("title", "Laws.Africa source"),
+            "url": source_url,
+            "text": result.get("content", {}).get("text", ""),
+        })
+    return sources
     genai.configure(api_key=api_key)
     model = genai.GenerativeModel("gemini-1.5-flash", system_instruction="You are a South African contract analyst. Return only valid JSON.")
     response = model.generate_content(prompt, generation_config={"response_mime_type": "application/json"})
@@ -184,7 +225,15 @@ def gemini_json(prompt: str) -> Any | None:
 
 @app.get("/api/v1/health")
 def health() -> dict[str, str]:
-    return {"status": "ok", "gemini": "configured" if os.getenv("GEMINI_API_KEY") else "demo-mode"}
+    return {
+        "status": "ok",
+        "gemini": "configured" if os.getenv("GEMINI_API_KEY") else "demo-mode",
+        "laws_africa": "configured" if os.getenv("LAWS_AFRICA_API_TOKEN") else "demo-mode",
+    }
+
+@app.post("/api/v1/legal-search")
+def legal_search(request: LegalSearchRequest) -> dict[str, list[dict[str, str]]]:
+    return {"sources": laws_africa_retrieve(request.query, request.top_k)}
 
 @app.get("/api/v1/demo-contract", response_model=ContractResponse)
 def demo_contract() -> ContractResponse:
@@ -210,13 +259,18 @@ def analyze_risks(request: AnalyzeRequest) -> AnalysisResult:
 
 @app.post("/api/v1/chat-qa", response_model=ChatResponse)
 def chat_qa(request: ChatRequest) -> ChatResponse:
-    prompt = f"Answer in plain language using only this contract context. Cite clause numbers exactly. Query: {request.query}\nContext:\n{request.contract_context}"
+    legal_sources = laws_africa_retrieve(request.query)
+    legal_context = "\n\n".join(
+        f"Title: {source['title']}\nSource: {source['url']}\nText: {source['text']}"
+        for source in legal_sources
+    )
+    prompt = f"Answer in plain language using only this contract context and authoritative legal context. Cite clause numbers exactly. Do not present legal information as legal advice. Query: {request.query}\nContract context:\n{request.contract_context}\nAuthoritative Laws.Africa context:\n{legal_context}"
     answer = gemini_json(prompt)
     if isinstance(answer, dict) and answer.get("answer"):
-        return ChatResponse(answer=answer["answer"], citations=answer.get("citations", []))
+        return ChatResponse(answer=answer["answer"], citations=answer.get("citations", []), legal_sources=legal_sources)
     query = request.query.lower()
     if "popia" in query or "data" in query:
-        return ChatResponse(answer="Clause 3.1 permits processing personal information but does not include explicit operator terms. Treat it as amber until a POPIA section 21 data processing addendum is signed.", citations=["3.1", "POPIA s21"])
+        return ChatResponse(answer="Clause 3.1 permits processing personal information but does not include explicit operator terms. Treat it as amber until a POPIA section 21 data processing addendum is signed.", citations=["3.1", "POPIA s21"], legal_sources=legal_sources)
     if "notice" in query or "termination" in query:
-        return ChatResponse(answer="Clause 6.1 provides for 30 days' written notice by either party.", citations=["6.1"])
-    return ChatResponse(answer="The clearest high-risk items are the 30-day warranty in clause 2.1, unlimited indemnity in clause 4.1, and background IP transfer in clause 5.1.", citations=["2.1", "4.1", "5.1"])
+        return ChatResponse(answer="Clause 6.1 provides for 30 days' written notice by either party.", citations=["6.1"], legal_sources=legal_sources)
+    return ChatResponse(answer="The clearest high-risk items are the 30-day warranty in clause 2.1, unlimited indemnity in clause 4.1, and background IP transfer in clause 5.1.", citations=["2.1", "4.1", "5.1"], legal_sources=legal_sources)
