@@ -6,6 +6,7 @@ import {
   AlertTriangle,
   ArrowUpRight,
   Check,
+  CheckCircle2,
   ChevronDown,
   Copy,
   FileText,
@@ -36,6 +37,7 @@ import {
   type Risk,
   type RiskLevel,
 } from "@/lib/api";
+import { takePendingUploadFile } from "@/lib/pendingUpload";
 
 pdfjs.GlobalWorkerOptions.workerSrc = new URL(
   "pdfjs-dist/build/pdf.worker.min.mjs",
@@ -174,6 +176,20 @@ const DEFAULT_SUGGESTIONS = [
   "Are there hidden liabilities?",
 ];
 
+type Phase = "idle" | "processing" | "ready";
+type RiskFilter = "ALL" | RiskLevel;
+
+// The backend analyzes a contract in one synchronous call with no incremental
+// progress signal, so this is a staged, simulated progress indicator (not a
+// literal readout of backend internals) that advances while the request is
+// in flight and completes on the real response.
+const PROCESSING_STAGES: Array<{ pct: number; label: string }> = [
+  { pct: 12, label: "Uploading document..." },
+  { pct: 35, label: "Extracting clauses..." },
+  { pct: 60, label: "Matching South African statutory rules..." },
+  { pct: 85, label: "Drafting redline suggestions..." },
+];
+
 export default function Home() {
   const [contract, setContract] = useState<Contract>(demo);
   const [activeTab, setActiveTab] = useState<"risks" | "chat">("risks");
@@ -191,19 +207,26 @@ export default function Home() {
   const [suggestions, setSuggestions] = useState<string[]>(DEFAULT_SUGGESTIONS);
   const [isTyping, setIsTyping] = useState(false);
   const [question, setQuestion] = useState("");
-  const [loading, setLoading] = useState(false);
   const [exporting, setExporting] = useState(false);
   const [uploadError, setUploadError] = useState("");
   const [documentUrl, setDocumentUrl] = useState<string | null>(null);
   const [documentIsPdf, setDocumentIsPdf] = useState(false);
+  const [phase, setPhase] = useState<Phase>("idle");
+  const [progress, setProgress] = useState(0);
+  const [progressLabel, setProgressLabel] = useState("");
+  const [showCompleteBanner, setShowCompleteBanner] = useState(false);
+  const [activeFilter, setActiveFilter] = useState<RiskFilter>("ALL");
   const fileInput = useRef<HTMLInputElement>(null);
   const clauseRefs = useRef<Record<string, HTMLDivElement | null>>({});
+  const cancelledRef = useRef(false);
+  const initializedRef = useRef(false);
   const visibleRisks = useMemo(
     () =>
       contract.analysis.risks
         .filter((risk) => !dismissed.includes(risk.id))
+        .filter((risk) => activeFilter === "ALL" || risk.risk_level === activeFilter)
         .sort((a, b) => riskOrder[a.risk_level] - riskOrder[b.risk_level]),
-    [contract.analysis.risks, dismissed],
+    [contract.analysis.risks, dismissed, activeFilter],
   );
   const acceptedClauseNumbers = useMemo(
     () =>
@@ -212,11 +235,45 @@ export default function Home() {
         .map((risk) => risk.clause_number),
     [contract.analysis.risks, accepted],
   );
+  // Live counts of actual issues raised, not the backend's static summary —
+  // otherwise dismissing a risk (or filtering) leaves the badges stale, and
+  // "Low" previously reused the "clauses with no risk at all" count instead
+  // of counting actual GREEN-severity issues (of which there currently are
+  // none in the SA rules matrix), which didn't match what clicking the
+  // filter actually showed.
+  const liveCounts = useMemo(() => {
+    const active = contract.analysis.risks.filter((risk) => !dismissed.includes(risk.id));
+    return {
+      red: active.filter((risk) => risk.risk_level === "RED").length,
+      amber: active.filter((risk) => risk.risk_level === "AMBER").length,
+      green: active.filter((risk) => risk.risk_level === "GREEN").length,
+    };
+  }, [contract.analysis.risks, dismissed]);
 
   useEffect(() => {
-    fetchDemoContract()
-      .then(setContract)
-      .catch(() => undefined);
+    // React 18 Strict Mode (Next.js dev default) mounts, cleans up, and
+    // re-mounts this effect once to surface cleanup bugs. Without this guard
+    // that second invocation would find takePendingUploadFile() already
+    // consumed and fall through to loading the demo contract, overwriting
+    // the real upload once it resolves. cancelledRef is reset on every
+    // invocation (including the synthetic one) so it still correctly blocks
+    // state updates after a genuine unmount.
+    cancelledRef.current = false;
+    if (!initializedRef.current) {
+      initializedRef.current = true;
+      const pendingFile = takePendingUploadFile();
+      if (pendingFile) {
+        processFile(pendingFile);
+      } else {
+        fetchDemoContract()
+          .then(setContract)
+          .catch(() => undefined);
+      }
+    }
+    return () => {
+      cancelledRef.current = true;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   useEffect(() => {
@@ -232,35 +289,54 @@ export default function Home() {
       block: "center",
     });
   }
-  async function handleUpload(event: React.ChangeEvent<HTMLInputElement>) {
-    const file = event.target.files?.[0];
-    if (!file) return;
-    setLoading(true);
+  function processFile(file: File) {
+    setPhase("processing");
+    setProgress(0);
+    setProgressLabel(PROCESSING_STAGES[0].label);
+    setShowCompleteBanner(false);
     setUploadError("");
-    try {
-      const uploadedContract = await uploadAndAnalyzeContract(file);
-      setContract(uploadedContract);
-      setDocumentUrl(URL.createObjectURL(file));
-      setDocumentIsPdf(file.type === "application/pdf" || file.name.toLowerCase().endsWith(".pdf"));
-      setUploadError("");
-      setAccepted([]);
-      setDismissed([]);
-      setSelectedClause(null);
-      setSuggestions(DEFAULT_SUGGESTIONS);
-      setActiveTab("risks");
-    } catch {
-      setUploadError(
-        "Upload failed. Check that the FastAPI backend is running, then try again.",
-      );
-      setChat((messages) => [
-        ...messages,
-        {
-          role: "assistant",
-          text: "I could not reach the local API. The demo contract is still available, and you can start FastAPI with `uvicorn main:app --reload` in the backend folder.",
-        },
-      ]);
-    }
-    setLoading(false);
+    setDocumentUrl(URL.createObjectURL(file));
+    setDocumentIsPdf(file.type === "application/pdf" || file.name.toLowerCase().endsWith(".pdf"));
+
+    let stageIndex = 0;
+    const timer = setInterval(() => {
+      if (stageIndex >= PROCESSING_STAGES.length) return;
+      setProgress(PROCESSING_STAGES[stageIndex].pct);
+      setProgressLabel(PROCESSING_STAGES[stageIndex].label);
+      stageIndex += 1;
+    }, 650);
+
+    uploadAndAnalyzeContract(file)
+      .then((uploadedContract) => {
+        clearInterval(timer);
+        if (cancelledRef.current) return;
+        setProgress(100);
+        setProgressLabel("Review complete");
+        setContract(uploadedContract);
+        setAccepted([]);
+        setDismissed([]);
+        setSelectedClause(null);
+        setSuggestions(DEFAULT_SUGGESTIONS);
+        setActiveTab("risks");
+        setActiveFilter("ALL");
+        setPhase("ready");
+        setShowCompleteBanner(true);
+        window.setTimeout(() => {
+          if (!cancelledRef.current) setShowCompleteBanner(false);
+        }, 6000);
+      })
+      .catch(() => {
+        clearInterval(timer);
+        if (cancelledRef.current) return;
+        setPhase("ready");
+        setUploadError("Upload failed. Check that the FastAPI backend is running, then try again.");
+      });
+  }
+  function handleUpload(event: React.ChangeEvent<HTMLInputElement>) {
+    const file = event.target.files?.[0];
+    event.target.value = "";
+    if (!file) return;
+    processFile(file);
   }
   async function ask(query = question) {
     if (!query.trim() || !contract.contract_id) return;
@@ -317,7 +393,7 @@ export default function Home() {
     }
     setExporting(false);
   }
-  const counts = contract.analysis.summary;
+  const counts = liveCounts;
 
   return (
     <main className="lexisa-app min-h-screen bg-[#f7f7f5]">
@@ -346,9 +422,10 @@ export default function Home() {
           />
           <Button
             onClick={() => fileInput.current?.click()}
-            className="bg-[#11262a] text-white hover:bg-[#25464b]"
+            disabled={phase === "processing"}
+            className="bg-[#11262a] text-white hover:bg-[#25464b] disabled:opacity-60"
           >
-            {loading ? (
+            {phase === "processing" ? (
               <Loader2 size={16} className="animate-spin" />
             ) : (
               <Upload size={16} />
@@ -375,6 +452,20 @@ export default function Home() {
           </Button>
         </div>
       </header>
+      {phase === "processing" && (
+        <div className="flex items-center gap-2 border-b border-[#0d3a86] bg-[#0b469d] px-5 py-2.5 text-sm font-semibold text-white lg:px-8">
+          <Loader2 size={15} className="animate-spin" /> Processing {contract.filename || "your document"}
+          <span className="opacity-80">— {progressLabel}</span>
+        </div>
+      )}
+      {showCompleteBanner && (
+        <div className="flex items-center gap-2 border-b border-[#1f5f4e] bg-[#22785f] px-5 py-2.5 text-sm font-semibold text-white lg:px-8">
+          <CheckCircle2 size={15} /> Review complete
+          <span className="opacity-90">
+            — {counts.red + counts.amber} item{counts.red + counts.amber === 1 ? "" : "s"} need your attention.
+          </span>
+        </div>
+      )}
       <section className="flex flex-wrap items-center justify-between gap-3 border-b border-[#d8ded8] bg-[#eef2ec] px-5 py-3 lg:px-8">
         <div className="flex items-center gap-2 text-xs text-[#62716d]">
           <FileText size={15} />
@@ -385,9 +476,27 @@ export default function Home() {
           <span>Reviewed just now</span>
         </div>
         <div className="flex items-center gap-2">
-          <Metric color="bg-[#ec6855]" label="High" value={counts.red} />
-          <Metric color="bg-[#e6b94f]" label="Medium" value={counts.amber} />
-          <Metric color="bg-[#a4d5c8]" label="Low" value={counts.green} />
+          <Metric
+            color="bg-[#ec6855]"
+            label="High"
+            value={counts.red}
+            active={activeFilter === "RED"}
+            onClick={() => setActiveFilter((current) => (current === "RED" ? "ALL" : "RED"))}
+          />
+          <Metric
+            color="bg-[#e6b94f]"
+            label="Medium"
+            value={counts.amber}
+            active={activeFilter === "AMBER"}
+            onClick={() => setActiveFilter((current) => (current === "AMBER" ? "ALL" : "AMBER"))}
+          />
+          <Metric
+            color="bg-[#a4d5c8]"
+            label="Low"
+            value={counts.green}
+            active={activeFilter === "GREEN"}
+            onClick={() => setActiveFilter((current) => (current === "GREEN" ? "ALL" : "GREEN"))}
+          />
         </div>
       </section>
       <div className="grid min-h-[calc(100vh-129px)] lg:grid-cols-[minmax(0,1.05fr)_minmax(440px,0.95fr)]">
@@ -491,6 +600,10 @@ export default function Home() {
                 <Sparkles size={12} className="mr-1" /> Gemini ready
               </Badge>
             </div>
+            {phase === "processing" ? (
+              <ProcessingPane progress={progress} label={progressLabel} />
+            ) : (
+            <>
             <div className="mb-5 flex border-b border-[#d8ded8]">
               <button
                 onClick={() => setActiveTab("risks")}
@@ -521,25 +634,33 @@ export default function Home() {
             </div>
             {activeTab === "risks" ? (
               <ScrollArea className="chat-scroll flex-1 pr-1">
-                <div className="space-y-3">
-                  {visibleRisks.map((risk, index) => (
-                    <RiskCard
-                      key={risk.id}
-                      risk={risk}
-                      index={index}
-                      expanded={expanded === risk.id}
-                      accepted={accepted.includes(risk.id)}
-                      onExpand={() =>
-                        setExpanded(expanded === risk.id ? null : risk.id)
-                      }
-                      onJump={() => jumpToClause(risk.clause_number)}
-                      onAccept={() => handleAcceptRedline(risk)}
-                      onDismiss={() =>
-                        setDismissed((items) => [...items, risk.id])
-                      }
-                    />
-                  ))}
-                </div>
+                {visibleRisks.length === 0 ? (
+                  <div className="rounded-xl border border-dashed border-[#d8ded8] p-6 text-center text-sm text-[#84908b]">
+                    {activeFilter === "ALL"
+                      ? "No concerns to show — everything is either resolved or dismissed."
+                      : `No ${activeFilter === "RED" ? "high" : activeFilter === "AMBER" ? "medium" : "low"}-risk items match the current filter.`}
+                  </div>
+                ) : (
+                  <div className="space-y-3">
+                    {visibleRisks.map((risk, index) => (
+                      <RiskCard
+                        key={risk.id}
+                        risk={risk}
+                        index={index}
+                        expanded={expanded === risk.id}
+                        accepted={accepted.includes(risk.id)}
+                        onExpand={() =>
+                          setExpanded(expanded === risk.id ? null : risk.id)
+                        }
+                        onJump={() => jumpToClause(risk.clause_number)}
+                        onAccept={() => handleAcceptRedline(risk)}
+                        onDismiss={() =>
+                          setDismissed((items) => [...items, risk.id])
+                        }
+                      />
+                    ))}
+                  </div>
+                )}
               </ScrollArea>
             ) : (
               <ChatView
@@ -551,6 +672,8 @@ export default function Home() {
                 suggestions={suggestions}
                 isTyping={isTyping}
               />
+            )}
+            </>
             )}
           </div>
         </section>
@@ -615,6 +738,17 @@ function PdfDocumentViewer({
     highlightTextLayer();
   }, [selectedClause, risks, acceptedClauseNumbers]);
 
+  // Scrolls the highlighted clause into view whenever the selection changes
+  // (a risk card's "Clause X.X" link, or a chat citation). Runs as a separate
+  // effect so accepting a redline or the highlight pass re-running doesn't
+  // also cause an unwanted scroll jump.
+  useEffect(() => {
+    if (!selectedClause) return;
+    const target = viewerRef.current?.querySelector(".pdf-risk-selected");
+    target?.scrollIntoView({ behavior: "smooth", block: "center" });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selectedClause]);
+
   return (
     <div
       ref={viewerRef}
@@ -641,23 +775,55 @@ function PdfDocumentViewer({
   );
 }
 
+function ProcessingPane({ progress, label }: { progress: number; label: string }) {
+  return (
+    <div className="flex flex-1 flex-col items-center justify-center rounded-xl border border-dashed border-[#d8ded8] bg-[#f8f6ef] p-10 text-center">
+      <Loader2 size={28} className="mb-4 animate-spin text-[#ad7657]" />
+      <p className="font-display text-lg font-bold tracking-[-0.02em] text-[#11262a]">
+        Reviewing your document
+      </p>
+      <p className="mt-1 text-sm text-[#7c8984]">{label}</p>
+      <div className="mt-5 h-2 w-full max-w-xs overflow-hidden rounded-full bg-[#e5e0d7]">
+        <div
+          className="h-full rounded-full bg-[#ad7657] transition-[width] duration-500 ease-out"
+          style={{ width: `${progress}%` }}
+        />
+      </div>
+      <p className="mt-2 text-xs font-semibold text-[#9aa39e]">{progress}%</p>
+    </div>
+  );
+}
 function Metric({
   color,
   label,
   value,
+  active,
+  onClick,
 }: {
   color: string;
   label: string;
   value: number;
+  active: boolean;
+  onClick: () => void;
 }) {
   return (
-    <div className="flex items-center gap-1.5 rounded-full border border-[#d6ded8] bg-[#fbfaf7] px-2.5 py-1 text-xs font-bold">
-      <span className={cn("h-2 w-2 rounded-full", color)} />
+    <button
+      type="button"
+      onClick={onClick}
+      aria-pressed={active}
+      className={cn(
+        "flex items-center gap-1.5 rounded-full border px-2.5 py-1 text-xs font-bold transition-colors",
+        active
+          ? "border-[#ad7657] bg-[#ad7657] text-[#1f140d]"
+          : "border-[#d6ded8] bg-[#fbfaf7] text-[#11262a] hover:border-[#ad7657]",
+      )}
+    >
+      <span className={cn("h-2 w-2 rounded-full", active ? "bg-[#1f140d]" : color)} />
       {value}
-      <span className="hidden font-medium text-[#7c8984] sm:inline">
+      <span className={cn("hidden sm:inline font-medium", active ? "text-[#1f140d]/80" : "text-[#7c8984]")}>
         {label}
       </span>
-    </div>
+    </button>
   );
 }
 function RiskCard({

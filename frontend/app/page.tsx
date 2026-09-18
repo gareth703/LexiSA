@@ -1,8 +1,24 @@
+"use client";
+
 import { ArrowRight, Scale, Upload } from "lucide-react";
 import Link from "next/link";
+import { useRouter } from "next/navigation";
+import { useRef } from "react";
 import { ConvergenceLogo } from "@/components/brand";
+import { setPendingUploadFile } from "@/lib/pendingUpload";
 
 export default function Home() {
+  const router = useRouter();
+  const fileInput = useRef<HTMLInputElement>(null);
+
+  function handleFileChosen(event: React.ChangeEvent<HTMLInputElement>) {
+    const file = event.target.files?.[0];
+    event.target.value = "";
+    if (!file) return;
+    setPendingUploadFile(file);
+    router.push("/review");
+  }
+
   return (
     <main className="flex min-h-screen flex-col bg-[#111216] text-[#f7f7f5]">
       <header className="flex items-center gap-4 px-6 py-6 lg:px-10">
@@ -34,8 +50,16 @@ export default function Home() {
         </p>
 
         <div className="mt-6 grid w-full max-w-3xl gap-5 sm:grid-cols-2">
-          <Link
-            href="/workbench"
+          <input
+            ref={fileInput}
+            type="file"
+            accept=".pdf,.docx"
+            onChange={handleFileChosen}
+            className="hidden"
+          />
+          <button
+            type="button"
+            onClick={() => fileInput.current?.click()}
             className="group flex flex-col items-start rounded-2xl border border-[#2c2d33] bg-[#17181c] p-7 text-left transition-colors hover:border-[#e30613] hover:bg-[#1c1416]"
           >
             <span className="mb-5 flex h-12 w-12 items-center justify-center rounded-xl bg-[#e30613]/15 text-[#ff2b36]">
@@ -45,14 +69,14 @@ export default function Home() {
               Upload a legal document
             </h2>
             <p className="mt-2 text-sm leading-6 text-[#9ea1a8]">
-              Get an instant risk review of a contract you upload, with clause-by-clause
-              redlines and a downloadable redlined PDF.
+              Choose a PDF or Word contract from your computer for an instant risk review, with
+              clause-by-clause redlines and a downloadable redlined PDF.
             </p>
             <span className="mt-5 inline-flex items-center gap-1.5 text-sm font-bold text-[#ff2b36]">
-              Start a review
+              Choose a file
               <ArrowRight size={15} className="transition-transform group-hover:translate-x-1" />
             </span>
-          </Link>
+          </button>
 
           <Link
             href="/ask"

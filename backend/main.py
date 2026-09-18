@@ -173,36 +173,6 @@ class ContractCreationContext(BaseModel):
     contract_value_zar: float = 0
     governing_jurisdiction: str | None = None
 
-CATEGORY_KEYWORDS = {
-    "Warranty": ["warrant", "delivery"],
-    "Data Protection": ["personal information", "personal data", "process", "operator"],
-    "Indemnity": ["indemn", "hold harmless"],
-    "IP": ["intellectual property", "background", "transfer"],
-    "Termination": ["terminate", "termination", "notice"],
-    "Dispute Resolution": ["governing law", "jurisdiction", "arbitration", "courts"],
-}
-
-
-def categorize(text: str) -> str:
-    lowered = text.lower()
-    for category, keywords in CATEGORY_KEYWORDS.items():
-        if any(keyword in lowered for keyword in keywords):
-            return category
-    return "Other"
-
-
-def split_clauses(text: str) -> list[Clause]:
-    matches = list(re.finditer(r"(?m)^(\d+(?:\.\d+)*)\s+([^\n]+)", text))
-    clauses: list[Clause] = []
-    for index, match in enumerate(matches):
-        end = matches[index + 1].start() if index + 1 < len(matches) else len(text)
-        block = text[match.start():end].strip()
-        lines = block.splitlines()
-        heading = match.group(2).strip() if len(lines) == 1 else ""
-        clauses.append(Clause(number=match.group(1), heading=heading, text=block, category=categorize(block)))
-    return clauses or [Clause(number="", text=text, category=categorize(text))]
-
-
 def analysis_rule_matches(rule: dict[str, Any], clause: Clause) -> bool:
     text = clause.text.lower()
     rule_id = rule["id"]
@@ -210,9 +180,9 @@ def analysis_rule_matches(rule: dict[str, Any], clause: Clause) -> bool:
         durations = [int(value) for value in re.findall(r"\b(\d{1,3})\s*days?\b", text)]
         return clause.category == "Warranty" and (any(days < 180 for days in durations) or "exclude" in text and "statutory" in text)
     if rule_id == "FLAG_UNLIMITED_INDEMNITY":
-        return clause.category == "Indemnity" and ("indemn" in text or "hold harmless" in text) and not any(term in text for term in ("cap", "capped", "limited liability", "limitation of liability"))
+        return clause.category == "Liability" and ("indemn" in text or "hold harmless" in text) and not any(term in text for term in ("cap", "capped", "limited liability", "limitation of liability"))
     if rule_id == "FLAG_FOREIGN_JURISDICTION":
-        return clause.category == "Dispute Resolution" and any(term in text for term in ("england", "wales", "delaware", "singapore", "foreign court"))
+        return clause.category == "Jurisdiction" and any(term in text for term in ("england", "wales", "delaware", "singapore", "foreign court"))
     return False
 
 
@@ -334,7 +304,8 @@ def evaluate_creation_rules(context: ContractCreationContext) -> dict[str, list[
 
 @app.get("/api/v1/demo-contract", response_model=ContractResponse)
 def demo_contract() -> ContractResponse:
-    clauses = split_clauses(DEMO_CONTRACT)
+    segmented = segment_clauses(DEMO_CONTRACT, use_llm_fallback=False)
+    clauses = [Clause(number=item["clause_number"], heading=item.get("title", ""), text=item["text"], category=item.get("category", "Other")) for item in segmented]
     analysis = analyze_clauses(clauses)
     contract_id = save_contract("Master Services Agreement — demo", DEMO_CONTRACT, [clause.model_dump() for clause in clauses], analysis.model_dump())
     return ContractResponse(contract_id=contract_id, filename="Master Services Agreement — demo", text=DEMO_CONTRACT, clauses=clauses, analysis=analysis)

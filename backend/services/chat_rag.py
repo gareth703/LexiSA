@@ -25,12 +25,14 @@ load_dotenv()
 logger = logging.getLogger("lexisa.chat_rag")
 
 CACHE_TOKEN_THRESHOLD = 32_000
-# A live Laws.Africa lookup (~4.5s) plus an uncapped Gemini call can together
-# take well over 2 seconds. Both are capped so the chat SLA holds even when
-# one or both are slow; the deterministic fallback keeps the answer correct
-# (and still POPIA/CPA-cited) whenever either budget is exceeded.
-LAWS_AFRICA_TIMEOUT_SECONDS = 0.2
-GEMINI_TIMEOUT_SECONDS = 1.0
+# Real Gemini calls for this model typically take 1.5-3s; Laws.Africa lookups
+# ~1-5s. These are generous enough that a genuine, document-grounded answer
+# succeeds for the vast majority of real user questions (arbitrary prompts,
+# not just the handful of keywords the deterministic fallback recognizes),
+# while still bounding worst-case latency if the API is genuinely stuck.
+# Override via env if your network/model is consistently slower or faster.
+LAWS_AFRICA_TIMEOUT_SECONDS = float(os.getenv("LAWS_AFRICA_TIMEOUT_SECONDS", "3.0"))
+GEMINI_TIMEOUT_SECONDS = float(os.getenv("GEMINI_TIMEOUT_SECONDS", "12.0"))
 
 STATIC_SA_CONTEXT = """South African legal grounding for contract review:
 - Consumer Protection Act 68 of 2008 section 56: consumers receive an implied six-month warranty of quality, subject to the Act.
