@@ -1,0 +1,80 @@
+{
+  "contract_creation_triggers": [
+    {
+      "id": "CREATE_POPIA_OPERATOR_ANNEX",
+      "rule_type": "CREATION_TRIGGER",
+      "category": "Data Privacy",
+      "act_reference": "POPIA (Act 4 of 2013), Section 21",
+      "trigger_condition": {"field": "processes_personal_data", "operator": "EQUALS", "value": true},
+      "action": "REQUIRE_ANNEXURE",
+      "required_template": "POPIA_OPERATOR_AGREEMENT_ANNEX_V1",
+      "prompt_instruction": "Inject Section 21 POPIA Data Processing Operator obligations, specifying mandatory encryption, breach notification within 24 hours, and audit rights."
+    },
+    {
+      "id": "CREATE_CPA_IMPLIED_WARRANTY",
+      "rule_type": "CREATION_TRIGGER",
+      "category": "Consumer Rights",
+      "act_reference": "Consumer Protection Act (Act 68 of 2008), Section 56",
+      "trigger_condition": {"field": "counterparty_type", "operator": "IN", "value": ["CONSUMER", "SMME_BELOW_THRESHOLD"]},
+      "action": "SET_MINIMUM_CLAUSE_PARAMETER",
+      "target_clause": "WARRANTY_PERIOD",
+      "minimum_value_days": 180,
+      "prompt_instruction": "Ensure the warranty clause explicitly grants a minimum 6-month (180-day) implied warranty of quality as mandated by Section 56 of the CPA. Do not allow draft inputs under 180 days."
+    },
+    {
+      "id": "CREATE_BEE_COMPLIANCE_DECLARATION",
+      "rule_type": "CREATION_TRIGGER",
+      "category": "Regulatory Compliance",
+      "act_reference": "Broad-Based Black Economic Empowerment Act (Act 53 of 2003)",
+      "trigger_condition": {"field": "contract_value_zar", "operator": "GREATER_THAN", "value": 1000000},
+      "action": "REQUIRE_CLAUSE",
+      "target_clause": "BBBEE_AFFIDAVIT_REQUIREMENT",
+      "prompt_instruction": "Insert a clause requiring the contractor/vendor to maintain and supply an annual B-BBEE Sworn Affidavit or Verification Certificate throughout the agreement tenure."
+    },
+    {
+      "id": "CREATE_AFSA_ARBITRATION",
+      "rule_type": "CREATION_TRIGGER",
+      "category": "Dispute Resolution",
+      "act_reference": "Arbitration Foundation of Southern Africa (AFSA) Commercial Rules",
+      "trigger_condition": {"field": "governing_jurisdiction", "operator": "EQUALS", "value": "SOUTH_AFRICA"},
+      "action": "INJECT_STANDARD_CLAUSE",
+      "target_clause": "DISPUTE_RESOLUTION_AFSA",
+      "prompt_instruction": "Default dispute resolution to expedited AFSA arbitration in Johannesburg/Durban/Cape Town rather than high court litigation to preserve SMME cash flow."
+    }
+  ],
+  "contract_analysis_triggers": [
+    {
+      "id": "FLAG_CPA_WARRANTY_BREACH",
+      "rule_type": "ANALYSIS_TRIGGER",
+      "category": "Warranty & Remedies",
+      "act_reference": "CPA Section 56",
+      "trigger_condition": "Extracted warranty duration is less than 6 months or attempts to exclude statutory CPA remedies.",
+      "severity": "RED",
+      "default_issue": "Clause restricts warranty below the statutory 6-month minimum under CPA Section 56, rendering it void in South Africa.",
+      "action_required": "FLAG_FOR_HUMAN_REVIEW",
+      "suggested_redline": "The Provider warrants that deliverables will be free from defects for a minimum period of six (6) months from delivery, in accordance with Section 56 of the Consumer Protection Act 68 of 2008."
+    },
+    {
+      "id": "FLAG_UNLIMITED_INDEMNITY",
+      "rule_type": "ANALYSIS_TRIGGER",
+      "category": "Liability & Risk",
+      "act_reference": "SA Commercial Law Standard Practice",
+      "trigger_condition": "Indemnity clause contains no financial cap or extends to indirect/consequential damages for the SMME.",
+      "severity": "RED",
+      "default_issue": "Uncapped indemnity exposes the SMME to catastrophic financial liability beyond the value of the contract.",
+      "action_required": "MUTUAL_CAP_REQUIRED",
+      "suggested_redline": "Each party's total aggregate liability under this Agreement shall be limited to the total fees paid or payable by the Client in the twelve (12) months preceding the claim."
+    },
+    {
+      "id": "FLAG_FOREIGN_JURISDICTION",
+      "rule_type": "ANALYSIS_TRIGGER",
+      "category": "Jurisdiction",
+      "act_reference": "Jurisdiction of South African Courts",
+      "trigger_condition": "Governing law specifies a foreign court (e.g., England & Wales, Delaware, Singapore).",
+      "severity": "AMBER",
+      "default_issue": "Litigating in a foreign jurisdiction is financially prohibitive for a South African SMME.",
+      "action_required": "FLAG_FOR_HUMAN_REVIEW",
+      "suggested_redline": "This Agreement shall be governed by and construed in accordance with the laws of the Republic of South Africa."
+    }
+  ]
+}

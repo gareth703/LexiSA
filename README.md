@@ -36,3 +36,6 @@ Open `http://localhost:3000`. Set `NEXT_PUBLIC_API_URL` if the API is not runnin
 - Uploads accept PDF and DOCX. Gemini responses are requested as JSON when `GEMINI_API_KEY` is configured.
 - Laws.Africa Knowledge Base retrieval is enabled with `LAWS_AFRICA_API_TOKEN` and defaults to `legislation-za`. Create a sandbox token at `https://platform.laws.africa/api-keys/`. The token stays server-side in `backend/.env`.
 - The AI assistant uses Laws.Africa results as authoritative context and renders source links for inspection. Without a token, it continues using the local demo rules and Gemini fallback.
+- SQLite initializes automatically as `backend/lexisa.db`. It stores the seeded SA SMME risk rules and analysis JSON for uploaded contracts. Run `python database.py` from `backend` to initialize it manually.
+- The rules engine is defined in `backend/data/smme_rules_matrix.json`. It contains creation triggers and contract analysis triggers, and the API and SQLite seed load it automatically on startup.
+- Evaluate creation rules with `POST /api/v1/evaluate-creation-rules` using fields such as `processes_personal_data`, `counterparty_type`, `contract_value_zar`, and `governing_jurisdiction`.

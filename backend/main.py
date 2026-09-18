@@ -16,6 +16,7 @@ from dotenv import load_dotenv
 from fastapi import FastAPI, File, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
+from database import count_records, init_db, load_rules_matrix, save_contract
 
 load_dotenv()
 try:
@@ -31,6 +32,8 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+RULES_MATRIX = load_rules_matrix()
+init_db(RULES_MATRIX)
 
 DEMO_CONTRACT = """MASTER SERVICES AGREEMENT
 
@@ -109,6 +112,12 @@ class LegalSearchRequest(BaseModel):
     query: str = Field(min_length=2)
     top_k: int = Field(default=5, ge=1, le=10)
 
+class ContractCreationContext(BaseModel):
+    processes_personal_data: bool = False
+    counterparty_type: str | None = None
+    contract_value_zar: float = 0
+    governing_jurisdiction: str | None = None
+
 CATEGORY_KEYWORDS = {
     "Warranty": ["warrant", "delivery"],
     "Data Protection": ["personal information", "personal data", "process", "operator"],
@@ -139,24 +148,29 @@ def split_clauses(text: str) -> list[Clause]:
     return clauses or [Clause(number="", text=text, category=categorize(text))]
 
 
-def make_risk(clause: Clause, level: RiskLevel, issue: str, citation: str, redline: str, index: int) -> Risk:
-    return Risk(id=f"risk-{index}", clause_number=clause.number, category=clause.category, risk_level=level, original_text=clause.text, issue=issue, sa_law_citation=citation, suggested_redline=redline)
+def analysis_rule_matches(rule: dict[str, Any], clause: Clause) -> bool:
+    text = clause.text.lower()
+    rule_id = rule["id"]
+    if rule_id == "FLAG_CPA_WARRANTY_BREACH":
+        durations = [int(value) for value in re.findall(r"\b(\d{1,3})\s*days?\b", text)]
+        return clause.category == "Warranty" and (any(days < 180 for days in durations) or "exclude" in text and "statutory" in text)
+    if rule_id == "FLAG_UNLIMITED_INDEMNITY":
+        return clause.category == "Indemnity" and ("indemn" in text or "hold harmless" in text) and not any(term in text for term in ("cap", "capped", "limited liability", "limitation of liability"))
+    if rule_id == "FLAG_FOREIGN_JURISDICTION":
+        return clause.category == "Dispute Resolution" and any(term in text for term in ("england", "wales", "delaware", "singapore", "foreign court"))
+    return False
+
+
+def make_risk(clause: Clause, rule: dict[str, Any], index: int) -> Risk:
+    return Risk(id=f"risk-{index}", clause_number=clause.number, category=rule["category"], risk_level=RiskLevel(rule["severity"]), original_text=clause.text, issue=rule["default_issue"], sa_law_citation=rule["act_reference"], suggested_redline=rule["suggested_redline"])
 
 
 def analyze_clauses(clauses: list[Clause]) -> AnalysisResult:
     risks: list[Risk] = []
     for clause in clauses:
-        text = clause.text.lower()
-        if clause.category == "Warranty" and re.search(r"\b(?:30|60|90)\s*days?\b", text):
-            risks.append(make_risk(clause, RiskLevel.RED, "The warranty is shorter than the six-month implied warranty period.", "Consumer Protection Act 68 of 2008, section 56", "The Supplier warrants the Services for at least six months from delivery, subject to fair and reasonable exclusions permitted by the CPA.", len(risks) + 1))
-        elif clause.category == "Data Protection" and "operator" not in text and "dpa" not in text:
-            risks.append(make_risk(clause, RiskLevel.AMBER, "Personal information may be processed without the required operator terms, instructions and security commitments.", "POPIA 4 of 2013, section 21", "The parties will enter into an Operator data processing addendum covering documented instructions, confidentiality, security safeguards, sub-processors and breach notification.", len(risks) + 1))
-        if clause.category == "Indemnity" and ("without limitation" in text or "any and all" in text):
-            risks.append(make_risk(clause, RiskLevel.RED, "This creates an unlimited indemnity for the Supplier and does not allocate liability proportionately.", "Common-law proportionality; Constitution section 34 access to justice", "The Supplier's aggregate liability will be capped at fees paid in the preceding 12 months, with uncapped liability limited to fraud, wilful misconduct and confidentiality breaches.", len(risks) + 1))
-        if clause.category == "IP" and "background" in text and "without additional compensation" in text:
-            risks.append(make_risk(clause, RiskLevel.RED, "Background IP transfers without compensation, potentially giving away pre-existing SMME assets.", "Copyright Act 98 of 1978; contractual IP principles", "Each party retains its background IP. The Supplier grants the Client a non-exclusive licence to use Supplier background IP only as needed to receive the Services.", len(risks) + 1))
-        if clause.category == "Dispute Resolution" and ("england" in text or "wales" in text or "overseas" in text):
-            risks.append(make_risk(clause, RiskLevel.AMBER, "Overseas courts increase cost and enforcement friction for a South African SMME.", "International Arbitration Act 15 of 2017; AFSA Rules", "South African law applies and disputes will be referred to mediation, then AFSA arbitration seated in Johannesburg, in English.", len(risks) + 1))
+        for rule in RULES_MATRIX["contract_analysis_triggers"]:
+            if analysis_rule_matches(rule, clause):
+                risks.append(make_risk(clause, rule, len(risks) + 1))
     red = sum(r.risk_level == RiskLevel.RED for r in risks)
     amber = sum(r.risk_level == RiskLevel.AMBER for r in risks)
     overall = "Needs attention" if red else "Review amber items" if amber else "Low risk"
@@ -180,6 +194,13 @@ def extract_text(filename: str, payload: bytes) -> str:
 def gemini_json(prompt: str) -> Any | None:
     api_key = os.getenv("GEMINI_API_KEY")
     if not api_key or not genai:
+        return None
+    genai.configure(api_key=api_key)
+    model = genai.GenerativeModel("gemini-1.5-flash", system_instruction="You are a South African contract analyst. Return only valid JSON.")
+    response = model.generate_content(prompt, generation_config={"response_mime_type": "application/json"})
+    try:
+        return json.loads(response.text)
+    except (json.JSONDecodeError, AttributeError):
         return None
 
 
@@ -215,25 +236,41 @@ def laws_africa_retrieve(query: str, top_k: int = 5) -> list[dict[str, str]]:
             "text": result.get("content", {}).get("text", ""),
         })
     return sources
-    genai.configure(api_key=api_key)
-    model = genai.GenerativeModel("gemini-1.5-flash", system_instruction="You are a South African contract analyst. Return only valid JSON.")
-    response = model.generate_content(prompt, generation_config={"response_mime_type": "application/json"})
-    try:
-        return json.loads(response.text)
-    except (json.JSONDecodeError, AttributeError):
-        return None
+
+
+def creation_rule_matches(rule: dict[str, Any], context: ContractCreationContext) -> bool:
+    condition = rule["trigger_condition"]
+    value = getattr(context, condition["field"])
+    operator = condition["operator"]
+    expected = condition["value"]
+    if operator == "EQUALS":
+        return value == expected
+    if operator == "IN":
+        return value in expected
+    if operator == "GREATER_THAN":
+        return value > expected
+    return False
 
 @app.get("/api/v1/health")
-def health() -> dict[str, str]:
+def health() -> dict[str, Any]:
     return {
         "status": "ok",
         "gemini": "configured" if os.getenv("GEMINI_API_KEY") else "demo-mode",
         "laws_africa": "configured" if os.getenv("LAWS_AFRICA_API_TOKEN") else "demo-mode",
+        "database": count_records(),
     }
 
 @app.post("/api/v1/legal-search")
 def legal_search(request: LegalSearchRequest) -> dict[str, list[dict[str, str]]]:
     return {"sources": laws_africa_retrieve(request.query, request.top_k)}
+
+@app.post("/api/v1/evaluate-creation-rules")
+def evaluate_creation_rules(context: ContractCreationContext) -> dict[str, list[dict[str, Any]]]:
+    matches = [
+        rule for rule in RULES_MATRIX["contract_creation_triggers"]
+        if creation_rule_matches(rule, context)
+    ]
+    return {"matched_rules": matches}
 
 @app.get("/api/v1/demo-contract", response_model=ContractResponse)
 def demo_contract() -> ContractResponse:
@@ -251,7 +288,9 @@ async def upload_contract(file: UploadFile = File(...)) -> ContractResponse:
         for clause, result in zip(clauses, categorized):
             if isinstance(result, dict) and result.get("category"):
                 clause.category = result["category"]
-    return ContractResponse(filename=file.filename or "uploaded contract", text=text, clauses=clauses, analysis=analyze_clauses(clauses))
+    analysis = analyze_clauses(clauses)
+    save_contract(file.filename or "uploaded contract", analysis.model_dump())
+    return ContractResponse(filename=file.filename or "uploaded contract", text=text, clauses=clauses, analysis=analysis)
 
 @app.post("/api/v1/analyze-risks", response_model=AnalysisResult)
 def analyze_risks(request: AnalyzeRequest) -> AnalysisResult:
