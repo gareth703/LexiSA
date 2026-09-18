@@ -41,6 +41,13 @@ export type RagChatResponse = {
   legal_sources: LegalSource[];
 };
 
+export type LegalQAResponse = {
+  answer: string;
+  sa_statute_citation: string;
+  suggested_followups: string[];
+  legal_sources: LegalSource[];
+};
+
 export type RedlineStatus = "ACCEPTED" | "REJECTED" | "PENDING";
 
 export type RedlineRecord = {
@@ -90,6 +97,10 @@ export function sendChatMessage(contractId: string, query: string): Promise<RagC
     jsonBody({ query }),
     "Send chat message",
   );
+}
+
+export function sendLegalQuestion(query: string): Promise<LegalQAResponse> {
+  return requestJson<LegalQAResponse>("/api/v1/legal-qa", jsonBody({ query }), "Send legal question");
 }
 
 export function acceptRedline(contractId: string, clauseNumber: string): Promise<RedlineRecord> {

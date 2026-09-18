@@ -25,7 +25,7 @@ DAILY_TOKEN_LIMIT = int(os.getenv("DAILY_TOKEN_LIMIT", "200000"))
 
 # Only endpoints that actually invoke Gemini are metered against the cap.
 METERED_PATH_SUFFIXES = ("/chat",)
-METERED_EXACT_PATHS = ("/api/v1/upload-contract",)
+METERED_EXACT_PATHS = ("/api/v1/upload-contract", "/api/v1/legal-qa")
 
 
 def is_metered_path(path: str) -> bool:

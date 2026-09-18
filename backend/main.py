@@ -21,6 +21,7 @@ from database import count_records, get_chat_history, get_contract, init_db, loa
 from middleware.cost_controller import CostControlMiddleware
 from services.analyzer import analyze_clauses_with_gemini
 from services.chat_rag import answer_contract_question
+from services.legal_qa import answer_legal_question
 from services.parser import extract_text_from_file
 from services.pdf_exporter import export_contract_pdf
 from services.redliner import accept_redline, apply_redlines_to_clauses, list_redlines, submit_custom_redline
@@ -156,6 +157,15 @@ class CustomRedlineRequest(BaseModel):
 class LegalSearchRequest(BaseModel):
     query: str = Field(min_length=2)
     top_k: int = Field(default=5, ge=1, le=10)
+
+class LegalQARequest(BaseModel):
+    query: str = Field(min_length=1)
+
+class LegalQAResponse(BaseModel):
+    answer: str
+    sa_statute_citation: str = ""
+    suggested_followups: list[str] = []
+    legal_sources: list[dict[str, str]] = []
 
 class ContractCreationContext(BaseModel):
     processes_personal_data: bool = False
@@ -309,6 +319,10 @@ def health() -> dict[str, Any]:
 @app.post("/api/v1/legal-search")
 def legal_search(request: LegalSearchRequest) -> dict[str, list[dict[str, str]]]:
     return {"sources": laws_africa_retrieve(request.query, request.top_k)}
+
+@app.post("/api/v1/legal-qa", response_model=LegalQAResponse)
+def legal_qa_endpoint(request: LegalQARequest) -> LegalQAResponse:
+    return LegalQAResponse(**answer_legal_question(request.query))
 
 @app.post("/api/v1/evaluate-creation-rules")
 def evaluate_creation_rules(context: ContractCreationContext) -> dict[str, list[dict[str, Any]]]:

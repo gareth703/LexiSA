@@ -48,7 +48,7 @@ class RAGAnswer(BaseModel):
     suggested_followups: list[str] = Field(default_factory=list)
 
 
-def _laws_africa_context(query: str, timeout: float = 8.0) -> list[dict[str, str]]:
+def laws_africa_context(query: str, timeout: float = 8.0) -> list[dict[str, str]]:
     token = os.getenv("LAWS_AFRICA_API_TOKEN")
     kb_code = os.getenv("LAWS_AFRICA_KB_CODE", "legislation-za")
     if not token:
@@ -101,7 +101,7 @@ def answer_contract_question(contract_id: str, query: str, chat_history: list[di
     contract = get_contract(contract_id)
     if not contract:
         raise ValueError(f"Contract session not found: {contract_id}")
-    sources = _laws_africa_context(query, timeout=LAWS_AFRICA_TIMEOUT_SECONDS)
+    sources = laws_africa_context(query, timeout=LAWS_AFRICA_TIMEOUT_SECONDS)
     legal_context = "\n\n".join(f"Title: {item['title']}\nSource: {item['url']}\nText: {item['text']}" for item in sources)
     context_prompt = (
         f"Contract filename: {contract['filename']}\nContract clauses and text:\n{json.dumps(contract.get('clauses', []))}\n"
